@@ -6,6 +6,7 @@ import io
 import os
 import sys
 import struct
+import itertools
 
 class ITMDWTPacket(object):
     pass
@@ -134,16 +135,35 @@ def InsaneVerbosePacketReceiver():
 
 @coroutine
 def PacketReceiverConsolePrinter(valid_address=-1):
-    while True:
-        f = yield
-        if not hasattr(f, "address"):
-            # Skip things like synchro packets
-            continue
-        if f.address == valid_address or valid_address == -1:
-            if (f.size == 1):
-                print(chr(f.data), end='')
+    invalid_buffer = []
+
+    def flush():
+        if invalid_buffer:
+            allinvalid = list(itertools.chain(*[x.bytes for x in invalid_buffer]))
+            if len(allinvalid) > 80:
+                print("Invalid data (%d byte): %r..%r"%(len(allinvalid), allinvalid[:40], allinvalid[-40:]))
             else:
-                print("Channel %d: %d byte value: %d : %#x : %d" % (f.address, f.size, f.data, f.data, f.sdata))
+                print("Invalid data (%d byte): %r"%(len(allinvalid), allinvalid))
+        invalid_buffer[:] = []
+
+    try:
+        while True:
+            f = yield
+            if isinstance(f, InvalidData):
+                invalid_buffer.append(f)
+                continue
+            if not hasattr(f, "address"):
+                # Skip things like synchro packets
+                continue
+            if f.address == valid_address or valid_address == -1:
+                flush()
+                if (f.size == 1):
+                    print(chr(f.data), end='')
+                else:
+                    print("Channel %d: %d byte value: %d : %#x : %d" % (f.address, f.size, f.data, f.data, f.sdata))
+    #except GeneratorExit:
+    finally:
+        flush()
 
 
 
@@ -196,6 +216,7 @@ if __name__ == "__main__":
                 if opts.follow:
                     time.sleep(0.5)
                 else:
+                    parser.close()
                     print("# All finished!")
                     break
 
