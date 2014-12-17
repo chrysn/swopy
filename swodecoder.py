@@ -7,7 +7,7 @@ import os
 import sys
 import struct
 
-class ITMDWTPacket():
+class ITMDWTPacket(object):
     pass
 
 class SynchroPacket(ITMDWTPacket):
@@ -42,6 +42,21 @@ class SourcePacket(ITMDWTPacket):
         if self.size == 4:
             return "SourcePacket32(A=%d, S=%d, D=%d (%#x)" % (self.address, self.source, self.data, self.data)
 
+class InvalidData(ITMDWTPacket):
+    def __init__(self, data):
+        self.bytes = data
+
+    def __repr__(self):
+        return "<%s: %r>"%(type(self).__name__, self.bytes)
+
+class UnexpectedInvalidData(InvalidData):
+    """Bytes that were expected to be in sync, and only recognized as
+    invalid"""
+
+class ExpectedInvalidData(InvalidData):
+    """Bytes at the beginning of a file or similar where it is expected to wait
+    for a SynchroPacket"""
+
 def coroutine(func):
     def start(*args,**kwargs):
         cr = func(*args,**kwargs)
@@ -61,41 +76,29 @@ def PacketParser(target, skip_to_sync=True):
         frame = []
         while not in_sync:
             b = (yield)
-            if b == 0:
-                frame.append(b)
-            else:
-                if b == 0x80 and (len(frame) == 5):
-                    frame.append(b)
-                else:
-                    print("Not in sync: invalid byte for sync frame: %d" % b)
-                    frame = []
+            frame.append(b)
+            if b != 0 and (b != 0x80 and (len(frame) < 6)):
+                target.send(ExpectedInvalidData(frame))
+                frame = []
 
-            #print("Frame so far", frame)
-            if frame == synchro:
+            if frame[-6:] == synchro:
                 in_sync = True
                 target.send(SynchroPacket())
 
         # Ok, we're in sync now, need to be prepared for anything at all...
         b = yield
         if b == 0:
-            fin = False
             frame = []
-            while not fin:
-                if (b == 0):
-                    frame.append(b)
-                else:
-                    if b == 0x80 and (len(frame) == 5):
-                        frame.append(b)
-                    else:
-                        print("invalid sync frame byte? trying to resync: %d" % b)
-                        frame = []
-                if frame == synchro:
-                    target.send(SynchroPacket())
-                    fin = True
-                else:
-                    b = yield
+            while True:
+                frame.append(b)
+                if b != 0 and (b != 0x80 and (len(frame) < 6)):
+                    target.send(UnexpectedInvalidData(frame))
+                    frame = []
 
-                #print("Frame2 so far", frame)
+                if frame[-6:] == synchro:
+                    target.send(SynchroPacket())
+                    break
+                b = yield
 
         elif ((b & 0x3) == 0):
             if b == 0x70:
