@@ -58,6 +58,17 @@ class ExpectedInvalidData(InvalidData):
     """Bytes at the beginning of a file or similar where it is expected to wait
     for a SynchroPacket"""
 
+class ReservedPacket(ITMDWTPacket):
+    pass
+
+class ExtensionPacket(ITMDWTPacket):
+    pass
+
+class TimestampPacket(ITMDWTPacket):
+    def __init__(self, ts, tc=0):
+        self.tc = tc # 0 = "emitted synchronously", 1 = "timestamp is delayed" (earlier events happened between the last and this ts), 2 = "event is delayed", 3 = "both delayed"
+        self.ts = ts
+
 def coroutine(func):
     def start(*args,**kwargs):
         cr = func(*args,**kwargs)
@@ -106,8 +117,27 @@ def PacketParser(target, skip_to_sync=True):
                 print("Overflow!")
                 target.send(OverflowPacket())
             else:
-                print("Protocol packet decoding not handled, breaking stream to next sync :( byte was: %d (%x)" % (b, b))
-                in_sync = False
+                # this group all follows the "continue bit" mechanism
+                continuation = [b]
+                for i in range(4):
+                    b = (yield)
+                    continuation.append(b)
+                    if b & 0x80 == 0:
+                        break
+
+                if continuation[0] & 0xf == 0:
+                    # time continuation
+                    if len(continuation) == 1:
+                        target.send(TimestampPacket(continuation[0] >> 4))
+                    else:
+                        # strip highest bit, join the remaining 7-bit groups
+                        ts = sum((x & 0x7f)<<(i*7) for (i, x) in enumerate(continuation[1:]))
+                        target.send(TimestampPacket(ts, (continuation[0] >> 4) & 0x3))
+                elif continuation[0] & 0x0f == 4:
+                    target.send(ReservedPacket())
+                else:
+                    # TODO: assemble the bits
+                    target.send(ExtensionPacket())
         else:
             address = (b & 0xf8) >> 3
             source = (b & 0x4) >> 2
@@ -152,11 +182,13 @@ def PacketReceiverConsolePrinter(valid_address=-1):
             if isinstance(f, InvalidData):
                 invalid_buffer.append(f)
                 continue
+            flush()
+            if isinstance(f, TimestampPacket):
+                print("(%s)"%f.ts, end='')
             if not hasattr(f, "address"):
                 # Skip things like synchro packets
                 continue
             if f.address == valid_address or valid_address == -1:
-                flush()
                 if (f.size == 1):
                     print(chr(f.data), end='')
                 else:
